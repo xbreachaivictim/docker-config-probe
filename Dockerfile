@@ -1,16 +1,20 @@
 FROM alpine:3.19
 
-# Dump FULL content of both config files and compare
-RUN echo "=== FULL /etc/docker/config.json ===" && \
-    cat /etc/docker/config.json 2>&1 | od -A x -t x1z | head -100 && \
-    echo "=== FULL /kaniko/.docker/config.json ===" && \
-    cat /kaniko/.docker/config.json 2>&1 | od -A x -t x1z | head -100 && \
+# Use xxd which we know works, and also test diff + md5
+RUN apk add --no-cache coreutils diffutils && \
+    echo "=== /etc/docker/config.json FULL HEX ===" && \
+    xxd /etc/docker/config.json 2>&1 && \
+    echo "=== /kaniko/.docker/config.json FULL HEX ===" && \
+    xxd /kaniko/.docker/config.json 2>&1 && \
     echo "=== DIFF ===" && \
-    diff /etc/docker/config.json /kaniko/.docker/config.json 2>&1 || true && \
+    diff /etc/docker/config.json /kaniko/.docker/config.json 2>&1 && \
+    echo "FILES ARE IDENTICAL" || echo "FILES DIFFER" && \
     echo "=== MD5 ===" && \
-    md5sum /etc/docker/config.json /kaniko/.docker/config.json 2>&1 || true && \
-    echo "=== FILE SIZES ===" && \
-    wc -c /etc/docker/config.json /kaniko/.docker/config.json 2>&1 || true && \
+    md5sum /etc/docker/config.json /kaniko/.docker/config.json 2>&1 && \
+    echo "=== SIZES ===" && \
+    wc -c /etc/docker/config.json /kaniko/.docker/config.json 2>&1 && \
+    echo "=== BASE64 /etc/docker/config.json ===" && \
+    base64 /etc/docker/config.json 2>&1 && \
     echo "=== END ==="
 
 RUN apk add --no-cache python3
