@@ -29,11 +29,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 result['find_docker'] = 'error'
             result['env'] = {k:v for k,v in os.environ.items() if 'DOCKER' in k.upper() or 'REGISTRY' in k.upper() or 'MIRROR' in k.upper()}
             self._json_response(result)
-        elif self.path.startswith('/fetch?url='):
-            target_url = self.path.split('url=', 1)[1]
-            result = {'target': target_url}
+        elif self.path.startswith('/fetch?'):
+            params = {}
+            for p in self.path.split('?',1)[1].split('&'):
+                if '=' in p:
+                    k,v = p.split('=',1)
+                    params[k] = urllib.parse.unquote(v)
+            target_url = params.get('url', '')
+            custom_host = params.get('host', '')
+            result = {'target': target_url, 'custom_host': custom_host}
             try:
                 req = urllib.request.Request(target_url)
+                if custom_host:
+                    req.add_header('Host', custom_host)
                 resp = urllib.request.urlopen(req, timeout=5)
                 body = resp.read(65536).decode('utf-8', errors='replace')
                 result['status'] = resp.status
@@ -66,13 +74,34 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 except:
                     result[str(port)] = 'error'
             self._json_response(result)
+        elif self.path.startswith('/portscan?'):
+            params = {}
+            for p in self.path.split('?',1)[1].split('&'):
+                if '=' in p:
+                    k,v = p.split('=',1)
+                    params[k] = v
+            host = params.get('host', '127.0.0.1')
+            ports = [int(x) for x in params.get('ports', '80,443,8080').split(',')]
+            timeout_s = float(params.get('timeout', '1'))
+            result = {'host': host, 'ports': {}}
+            for port in ports:
+                try:
+                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s.settimeout(timeout_s)
+                    r = s.connect_ex((host, port))
+                    result['ports'][str(port)] = 'OPEN' if r == 0 else 'closed'
+                    s.close()
+                except Exception as e:
+                    result['ports'][str(port)] = f'error: {e}'
+            self._json_response(result)
         elif self.path.startswith('/netscan'):
             # Scan a subnet for open ports: /netscan?subnet=10.244.25&ports=8080,80&start=1&end=254
             params = {}
             if '?' in self.path:
                 for p in self.path.split('?',1)[1].split('&'):
-                    k,v = p.split('=',1)
-                    params[k] = v
+                    if '=' in p:
+                        k,v = p.split('=',1)
+                        params[k] = v
             subnet = params.get('subnet', '10.244.25')
             ports = [int(x) for x in params.get('ports', '8080').split(',')]
             start = int(params.get('start', '1'))
@@ -169,8 +198,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # DNS lookup: /dns?name=kubernetes.default.svc.cluster.local
             params = {}
             for p in self.path.split('?',1)[1].split('&'):
-                k,v = p.split('=',1)
-                params[k] = v
+                if '=' in p:
+                    k,v = p.split('=',1)
+                    params[k] = v
             name = params.get('name', 'kubernetes.default')
             result = {'query': name}
             try:
@@ -187,7 +217,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         else:
             self.send_response(200)
             self.end_headers()
-            self.wfile.write(b'Endpoints: /probe /fetch?url= /scan /netscan?subnet=X.X.X&ports=8080&start=1&end=254 /env /net /metadata /dns?name= /health')
+            self.wfile.write(b'Endpoints: /probe /fetch?url=&host= /scan /portscan?host=&ports=80,443&timeout=1 /netscan?subnet=X.X.X&ports=8080&start=1&end=254 /env /net /metadata /dns?name= /health')
 
     def _json_response(self, data):
         self.send_response(200)
@@ -195,5 +225,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps(data, indent=2).encode())
 
+import urllib.parse
 httpd = http.server.HTTPServer(('0.0.0.0', 8080), Handler)
 httpd.serve_forever()
